@@ -1,0 +1,67 @@
+boards/apikey-board/components/apikey-board.tsx
+  ai_agent 1-579
+boards/apikey-board/next-env.d.ts
+  ai_agent 1-5
+boards/apikey-board/app/layout.tsx
+  ai_agent 1-32
+boards/apikey-board/app/api/ranking/route.ts
+  ai_agent 1-28
+boards/apikey-board/lib/config.ts
+  ai_agent 1-29
+boards/apikey-board/.gitignore
+  ai_agent 1-5
+boards/apikey-board/next.config.mjs
+  ai_agent 1-16
+boards/apikey-board/vitest.config.ts
+  ai_agent 1-14
+boards/apikey-board/lib/queries.ts
+  ai_agent 1-422
+boards/apikey-board/app/page.tsx
+  ai_agent 1-11
+boards/apikey-board/app/api/summary/route.ts
+  ai_agent 1-28
+boards/apikey-board/app/api/models/route.ts
+  ai_agent 1-28
+boards/apikey-board/docker-compose.yml
+  ai_agent 1-25
+boards/apikey-board/.env.example
+  ai_agent 1-5
+boards/apikey-board/app/api/health/route.ts
+  ai_agent 1-11
+boards/apikey-board/lib/range.test.ts
+  ai_agent 1-35
+boards/apikey-board/package.json
+  ai_agent 1-28
+boards/apikey-board/app/globals.css
+  ai_agent 1-459
+boards/apikey-board/lib/db.ts
+  ai_agent 1-20
+boards/apikey-board/lib/types.ts
+  ai_agent 1-105
+boards/apikey-board/app/api/trend/route.ts
+  ai_agent 1-28
+boards/apikey-board/Dockerfile
+  ai_agent 1-38
+boards/apikey-board/.dockerignore
+  ai_agent 1-5
+boards/apikey-board/tsconfig.json
+  ai_agent 1-40
+boards/apikey-board/README.md
+  ai_agent 1-75
+boards/apikey-board/lib/auth.ts
+  ai_agent 1-94
+boards/apikey-board/pnpm-lock.yaml
+  ai_agent 1-1436
+boards/apikey-board/app/api/groups/route.ts
+  ai_agent 1-25
+boards/apikey-board/lib/range.ts
+  ai_agent 1-24
+boards/apikey-board/lib/http.ts
+  ai_agent 1-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.9",
+  "base_commit_sha": "d8892b504a3ea00226d825a5aef34e87703c4a65",
+  "prompts": {}
+}
