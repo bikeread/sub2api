@@ -1,0 +1,25 @@
+services:
+  apikey-board:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BOARD_BASE_PATH: ${BOARD_BASE_PATH:-/boards/apikey}
+        REFRESH_DEFAULT_SECONDS: ${REFRESH_DEFAULT_SECONDS:-30}
+    container_name: apikey-board
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      SUB2API_BASE_URL: ${SUB2API_BASE_URL:?SUB2API_BASE_URL is required}
+      BOARD_BASE_PATH: ${BOARD_BASE_PATH:-/boards/apikey}
+      BOARD_TIMEZONE: ${BOARD_TIMEZONE:-Asia/Shanghai}
+      REFRESH_DEFAULT_SECONDS: ${REFRESH_DEFAULT_SECONDS:-30}
+    ports:
+      - "127.0.0.1:3090:3000"
+    networks:
+      - sub2api-network
+
+networks:
+  sub2api-network:
+    external: true
+    name: ${SUB2API_DOCKER_NETWORK:-sub2api_sub2api-network}
