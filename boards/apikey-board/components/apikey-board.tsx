@@ -26,6 +26,7 @@ type ViewState =
   | { kind: 'ready'; data: BoardData; refreshedAt: string };
 
 const TOKEN_STORAGE_KEY = 'apikey-board:admin-token';
+const GROUP_STORAGE_KEY = 'apikey-board:group-id';
 
 function readLang(raw: string | null): 'zh' | 'en' {
   return raw?.startsWith('zh') ? 'zh' : 'en';
@@ -313,6 +314,26 @@ function usePersistedToken(searchToken: string | null) {
   return token;
 }
 
+function readPersistedGroupId() {
+  if (typeof window === 'undefined') return null;
+
+  const persisted = window.localStorage.getItem(GROUP_STORAGE_KEY);
+  if (!persisted) return null;
+
+  const parsed = Number(persisted);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function persistGroupId(groupId: number | null) {
+  if (typeof window === 'undefined') return;
+
+  if (groupId === null) {
+    window.localStorage.removeItem(GROUP_STORAGE_KEY);
+  } else {
+    window.localStorage.setItem(GROUP_STORAGE_KEY, String(groupId));
+  }
+}
+
 function MetricCard({ label, value, detail, accent }: { label: string; value: string; detail: string; accent: string }) {
   return (
     <div className="metric-card" style={{ ['--accent' as string]: accent }}>
@@ -412,13 +433,22 @@ export function APIKeyBoard() {
   const copy = copyFor(lang);
   const token = usePersistedToken(searchParams.get('token'));
   const [range, setRange] = useState<BoardRange>('today');
-  const [groupId, setGroupId] = useState<number | null>(null);
+  const [groupId, setGroupId] = useState<number | null>(() => readPersistedGroupId());
   const { groups, error: groupsError } = useGroups(token, lang);
   const state = useBoardData(range, token, groupId);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    if (!groups.length || groupId === null) return;
+
+    if (!groups.some((group) => group.id === groupId)) {
+      setGroupId(null);
+      persistGroupId(null);
+    }
+  }, [groupId, groups]);
 
   const rangeTabs = useMemo(
     () => [
@@ -455,7 +485,9 @@ export function APIKeyBoard() {
                 value={groupId ?? 'all'}
                 onChange={(event) => {
                   const value = event.target.value;
-                  setGroupId(value === 'all' ? null : Number(value));
+                  const nextGroupId = value === 'all' ? null : Number(value);
+                  setGroupId(nextGroupId);
+                  persistGroupId(nextGroupId);
                 }}
               >
                 <option value="all">{copy.allGroups}</option>
