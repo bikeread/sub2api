@@ -1,0 +1,19 @@
+boards/apikey-board/components/apikey-board.tsx
+  s_4f110fc705fb2b::t_e0c08ffadabdfa 29,317-336,436,444-452,488-490
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.1",
+  "base_commit_sha": "c4aa91dd26ede29d55f640f755efbb06757379a3",
+  "prompts": {},
+  "sessions": {
+    "s_4f110fc705fb2b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e62ce-9d18-7962-b0e1-e4a631e4a771",
+        "model": "gpt-5.5"
+      },
+      "human_author": "bikeread <bikeread2008@gmail.com>"
+    }
+  }
+}
