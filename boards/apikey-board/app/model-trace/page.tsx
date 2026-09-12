@@ -247,7 +247,7 @@ function FragmentRow(props: {
                 {VERDICT_LABEL[last.verdict]}
               </span>
               <span style={{ ...styles.muted, marginLeft: 8, fontSize: 12 }}>
-                {new Date(last.detectedAt).toLocaleString('zh-CN', { hour12: false })}
+                {last.model} · {new Date(last.detectedAt).toLocaleString('zh-CN', { hour12: false })}
               </span>
             </button>
           ) : (
