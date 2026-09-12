@@ -10,6 +10,7 @@ import {
   getAccountSupportedModels,
   runChatCompletion,
   setAccountSchedulable,
+  syncUpstreamModels,
   updateAccount,
   type AdminAccount,
 } from './sub2api-admin';
@@ -30,25 +31,35 @@ const BANK_MODEL_PRIORITY = [
 ];
 
 /** 未显式指定时，自动选账号能力清单里最强的可归因模型。 */
-function resolveClaimedModel(
+async function resolveClaimedModel(
+  token: string,
+  accountId: number,
   requested: string | undefined,
   supported: string[],
-): string {
+): Promise<string> {
   const trimmed = (requested ?? '').trim();
+  let candidates = supported;
+  // 显式指定的模型不在能力清单时，先同步一次上游清单（清单可能是旧缓存），再判断
+  if (trimmed && candidates.length > 0 && !candidates.includes(trimmed)) {
+    const refreshed = await syncUpstreamModels(token, accountId).catch(
+      () => [] as string[],
+    );
+    if (refreshed.length > 0) candidates = refreshed;
+  }
   if (trimmed) {
-    if (supported.length > 0 && !supported.includes(trimmed)) {
+    if (candidates.length > 0 && !candidates.includes(trimmed)) {
       throw new Error(
-        `该账号能力清单不含 ${trimmed}（支持：${supported.join('、')}），请改填支持的模型或留空自动选择`,
+        `该账号能力清单不含 ${trimmed}（支持：${candidates.join('、')}），请改填支持的模型或留空自动选择`,
       );
     }
     return trimmed;
   }
   for (const candidate of BANK_MODEL_PRIORITY) {
-    if (supported.includes(candidate)) return candidate;
+    if (candidates.includes(candidate)) return candidate;
   }
-  if (supported.length > 0) {
+  if (candidates.length > 0) {
     throw new Error(
-      `该账号能力清单（${supported.join('、')}）里没有指纹库可归因的模型`,
+      `该账号能力清单（${candidates.join('、')}）里没有指纹库可归因的模型`,
     );
   }
   // 能力清单未知时退回默认
@@ -101,7 +112,7 @@ export async function detectAccount(
     throw new Error(`账号状态为 ${account.status}，仅支持检测 active 账号`);
   }
   const supported = await getAccountSupportedModels(token, account.id);
-  const model = resolveClaimedModel(requestedModel, supported);
+  const model = await resolveClaimedModel(token, account.id, requestedModel, supported);
   const route = await ensureProbeRoute(token, account);
 
   // 调度开关关闭的账号（多半正是被隔离的降智号）必须照常可测：

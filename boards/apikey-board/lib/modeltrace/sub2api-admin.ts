@@ -80,6 +80,19 @@ export async function getAccountSupportedModels(
   return models && typeof models === 'object' ? Object.keys(models) : [];
 }
 
+/** 同步账号上游模型清单（0.2.4+ 官方端点），返回同步后的模型列表。 */
+export async function syncUpstreamModels(
+  token: string,
+  accountId: number,
+): Promise<string[]> {
+  const data = await adminFetch<{ models?: string[] }>(
+    token,
+    `/api/v1/admin/accounts/${accountId}/models/sync-upstream`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+  return Array.isArray(data?.models) ? data.models : [];
+}
+
 export async function createProbeGroup(
   token: string,
   name: string,
