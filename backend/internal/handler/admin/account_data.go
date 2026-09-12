@@ -309,9 +309,11 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 					_, _ = h.adminService.UpdateProxy(ctx, existingID, &service.UpdateProxyInput{
 						Status:         normalizedStatus,
 						ExpiresAt:      existingExpiresAt,
+						ClearExpiresAt: existingExpiresAt == nil,
 						FallbackMode:   existingFallbackMode,
 						BackupProxyID:  existingBackupProxyID,
-						ExpiryWarnDays: item.ExpiryWarnDays,
+						ClearBackupID:  existingBackupProxyID == nil,
+						ExpiryWarnDays: &item.ExpiryWarnDays,
 						Name:           proxy.Name,
 						Protocol:       proxy.Protocol,
 						Host:           proxy.Host,
@@ -383,9 +385,11 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			_, _ = h.adminService.UpdateProxy(ctx, created.ID, &service.UpdateProxyInput{
 				Status:         normalizedStatus,
 				ExpiresAt:      expiresAt,
+				ClearExpiresAt: expiresAt == nil,
 				FallbackMode:   fallbackMode,
 				BackupProxyID:  backupProxyID,
-				ExpiryWarnDays: item.ExpiryWarnDays,
+				ClearBackupID:  backupProxyID == nil,
+				ExpiryWarnDays: &item.ExpiryWarnDays,
 				Name:           created.Name,
 				Protocol:       created.Protocol,
 				Host:           created.Host,
@@ -460,6 +464,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		if created.Platform == service.PlatformAntigravity && created.Type == service.AccountTypeOAuth {
 			privacyAccounts = append(privacyAccounts, created)
 		}
+		h.scheduleGrokImportProbe(created)
 		result.AccountCreated++
 	}
 
