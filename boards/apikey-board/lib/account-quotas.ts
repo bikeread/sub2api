@@ -91,3 +91,41 @@ export function hasCodexQuotaSnapshot(extra: CodexSnapshotExtra): boolean {
     parseExtraNumber(extra.codex_7d_used_percent) !== null
   );
 }
+
+export interface SubscriptionExpiry {
+  /** YYYY-MM-DD；上游缺失时为 null */
+  date: string | null;
+  /** 日期已早于当前时刻 → 该值可能陈旧（只在查询上游配额时才刷新） */
+  stale: boolean;
+}
+
+/**
+ * accounts.credentials.subscription_expires_at（RFC3339，订阅/套餐到期）解析。
+ * 注意与 credentials.expires_at（OAuth token 过期）和 accounts.expires_at（自动暂停）区分。
+ * 只展示原值日期，不派生"剩余天数"——该字段可能是陈旧快照。
+ */
+export function parseSubscriptionExpiry(
+  raw: unknown,
+  now: Date = new Date(),
+): SubscriptionExpiry {
+  const parsed = parseExtraDate(raw);
+  if (parsed === null) {
+    return { date: null, stale: false };
+  }
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  // 保留上游原字符串里的日期部分（含其自带偏移），避免跨时区换算把日期挪一天
+  const date = /^\d{4}-\d{2}-\d{2}/.test(text)
+    ? text.slice(0, 10)
+    : parsed.toISOString().slice(0, 10);
+  return { date, stale: parsed.getTime() < now.getTime() };
+}
+
+const PLAN_TYPE_LABELS: Record<'zh' | 'en', Record<string, string>> = {
+  zh: { free: '免费', pro: 'Pro', prolite: 'Pro Lite', plus: 'Plus', team: 'Team', business: 'Business' },
+  en: { free: 'Free', pro: 'Pro', prolite: 'Pro Lite', plus: 'Plus', team: 'Team', business: 'Business' },
+};
+
+export function planTypeLabel(planType: string | null, lang: 'zh' | 'en'): string {
+  if (!planType) return '—';
+  return PLAN_TYPE_LABELS[lang][planType.trim().toLowerCase()] ?? planType;
+}

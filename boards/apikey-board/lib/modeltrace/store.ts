@@ -3,9 +3,12 @@
 import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { DetectionVerdict } from './types';
+import type { HistoryEntry } from './types';
+import type { DetectionMethod } from './request';
+export type { HistoryEntry } from './types';
 
-const DATA_DIR = process.env.MODELTRACE_DATA_DIR || path.join(process.cwd(), 'data');
+const DATA_DIR =
+  process.env.MODELTRACE_DATA_DIR || path.join(process.cwd(), 'data');
 const STATE_FILE = path.join(DATA_DIR, 'modeltrace-state.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'modeltrace-history.jsonl');
 
@@ -19,19 +22,6 @@ export interface ProbeRoute {
 
 interface State {
   routes: ProbeRoute[];
-}
-
-export interface HistoryEntry {
-  accountId: number;
-  accountName: string;
-  model: string;
-  verdict: DetectionVerdict['verdict'];
-  reason: string;
-  prediction: string;
-  probability: number;
-  top: { model: string; probability: number }[];
-  usedOutputs: number;
-  detectedAt: string;
 }
 
 async function readState(): Promise<State> {
@@ -89,11 +79,14 @@ export async function listHistory(accountId?: number): Promise<HistoryEntry[]> {
 }
 
 /** 每个账号最近一次检测结论，用于列表页展示。 */
-export async function latestByAccount(): Promise<Map<number, HistoryEntry>> {
+export async function latestByAccount(
+  method: DetectionMethod = 'fingerprint',
+): Promise<Map<number, HistoryEntry>> {
   const all = await listHistory();
   const map = new Map<number, HistoryEntry>();
   for (const entry of all) {
-    if (!map.has(entry.accountId)) map.set(entry.accountId, entry);
+    if ((entry.method ?? 'fingerprint') === method && !map.has(entry.accountId))
+      map.set(entry.accountId, entry);
   }
   return map;
 }

@@ -1,3 +1,10 @@
+import {
+  getModelCatalog,
+  type AccountModelExtra,
+  type ModelCatalog,
+  type ReasoningEffort,
+} from './options';
+
 // Minimal sub2api admin client for model-trace provisioning.
 // 直接复用调用方（当前管理员）的 JWT，不额外存储任何凭证。
 
@@ -10,6 +17,7 @@ export interface AdminAccount {
   type: string;
   status: string;
   schedulable?: boolean;
+  extra?: AccountModelExtra;
 }
 
 function baseUrl(): string {
@@ -41,7 +49,9 @@ async function adminFetch<T>(
   return payload.data as T;
 }
 
-export async function listOpenAIAccounts(token: string): Promise<AdminAccount[]> {
+export async function listOpenAIAccounts(
+  token: string,
+): Promise<AdminAccount[]> {
   const data = await adminFetch<{ items?: AdminAccount[] }>(
     token,
     '/api/v1/admin/accounts?platform=openai&page=1&page_size=200&lite=true',
@@ -68,44 +78,36 @@ export async function getAccountGroupIds(
   return [...ids];
 }
 
-/** 账号上游能力清单（extra.upstream_model_metadata.models 的 key 列表）。 */
-export async function getAccountSupportedModels(
+/** Use the same synchronized catalog for dropdowns and request validation. */
+export async function getAccountModelCatalog(
   token: string,
   accountId: number,
-): Promise<string[]> {
-  const data = await adminFetch<{
-    extra?: { upstream_model_metadata?: { models?: Record<string, unknown> } };
-  }>(token, `/api/v1/admin/accounts/${accountId}`);
-  const models = data?.extra?.upstream_model_metadata?.models;
-  return models && typeof models === 'object' ? Object.keys(models) : [];
-}
-
-/** 同步账号上游模型清单（0.2.4+ 官方端点），返回同步后的模型列表。 */
-export async function syncUpstreamModels(
-  token: string,
-  accountId: number,
-): Promise<string[]> {
-  const data = await adminFetch<{ models?: string[] }>(
+): Promise<ModelCatalog> {
+  const data = await adminFetch<{ extra?: AccountModelExtra }>(
     token,
-    `/api/v1/admin/accounts/${accountId}/models/sync-upstream`,
-    { method: 'POST', body: JSON.stringify({}) },
+    `/api/v1/admin/accounts/${accountId}`,
   );
-  return Array.isArray(data?.models) ? data.models : [];
+  return getModelCatalog(data?.extra);
 }
 
 export async function createProbeGroup(
   token: string,
   name: string,
 ): Promise<number> {
-  const data = await adminFetch<{ id?: number }>(token, '/api/v1/admin/groups', {
-    method: 'POST',
-    body: JSON.stringify({
-      name,
-      description: 'managed-by-modeltrace：降智巡检专用单账号分组，勿手工编辑',
-      platform: 'openai',
-      rate_multiplier: 1,
-    }),
-  });
+  const data = await adminFetch<{ id?: number }>(
+    token,
+    '/api/v1/admin/groups',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        description:
+          'managed-by-modeltrace：降智巡检专用单账号分组，勿手工编辑',
+        platform: 'openai',
+        rate_multiplier: 1,
+      }),
+    },
+  );
   if (!data?.id) throw new Error('创建巡检分组失败：响应缺少 id');
   return data.id;
 }
@@ -166,11 +168,12 @@ export async function createProbeKey(
 }
 
 /** 调网关 chat completions，返回正文文本。 */
-export async function runChatCompletion(
+export async function runChatCompletionResult(
   apiKey: string,
   model: string,
   prompt: string,
-): Promise<string> {
+  reasoningEffort?: ReasoningEffort,
+): Promise<{ text: string; finishReason: string | null }> {
   const response = await fetch(`${baseUrl()}/v1/chat/completions`, {
     method: 'POST',
     headers: {
@@ -182,11 +185,13 @@ export async function runChatCompletion(
       messages: [{ role: 'user', content: prompt }],
       stream: false,
       max_tokens: 4096,
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     }),
     cache: 'no-store',
+    signal: AbortSignal.timeout(180_000),
   });
   const payload = (await response.json().catch(() => null)) as {
-    choices?: { message?: { content?: string } }[];
+    choices?: { message?: { content?: string }; finish_reason?: string }[];
     error?: { message?: string };
   } | null;
   if (!response.ok) {
@@ -195,13 +200,24 @@ export async function runChatCompletion(
       response.status === 503
         ? '（网关在该账号的巡检分组内选不出可调度账号：账号可能正处于冷却/过载窗口，稍后恢复调度再测）'
         : '';
-    throw new Error(
-      `网关请求失败 HTTP ${response.status}: ${upstream}${hint}`,
-    );
+    throw new Error(`网关请求失败 HTTP ${response.status}: ${upstream}${hint}`);
   }
   const content = payload?.choices?.[0]?.message?.content;
   if (typeof content !== 'string' || !content) {
     throw new Error('网关响应缺少文本内容');
   }
-  return content;
+  return {
+    text: content,
+    finishReason: payload?.choices?.[0]?.finish_reason ?? null,
+  };
+}
+
+export async function runChatCompletion(
+  apiKey: string,
+  model: string,
+  prompt: string,
+  reasoningEffort?: ReasoningEffort,
+): Promise<string> {
+  return (await runChatCompletionResult(apiKey, model, prompt, reasoningEffort))
+    .text;
 }

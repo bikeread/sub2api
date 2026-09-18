@@ -1,55 +1,49 @@
+import { FINGERPRINT_MODELS, type ReasoningEffort } from './options';
 // 降智检测执行器：开通巡检通道 → 三次挑战 → 归因 → 判定 → 落历史。
 
 import { generateChallenges } from './challenges';
 import { analyzeOutputs } from './fingerprint';
 import { judgeAttribution } from './judge';
 import { ensureProbeRoute } from './provision';
-import { appendHistory, type HistoryEntry } from './store';
+import { appendHistory } from './store';
 import {
   getAccountGroupIds,
-  getAccountSupportedModels,
+  getAccountModelCatalog,
   runChatCompletion,
+  runChatCompletionResult,
   setAccountSchedulable,
-  syncUpstreamModels,
   updateAccount,
   type AdminAccount,
 } from './sub2api-admin';
-import type { AttributionResult, DetectionVerdict } from './types';
+import type { DetectionOutcome, FingerprintHistoryEntry } from './types';
+import {
+  DetectionError,
+  parseDetectionRequest,
+  type DetectionMethod,
+} from './request';
+export type { DetectionOutcome } from './types';
 import bankJson from './data/unified_bank.json';
 import type { ModelTraceBank } from './types';
 
 const bank = bankJson as unknown as ModelTraceBank;
 
 // 指纹库可归因的 GPT 模型，按能力从强到弱
-const BANK_MODEL_PRIORITY = [
-  'gpt-6-astra',
-  'gpt-5.6-sol',
-  'gpt-5.6-terra',
-  'gpt-5.6-luna',
-  'gpt-5.5',
-  'gpt-5.4',
-];
+const BANK_MODEL_PRIORITY = FINGERPRINT_MODELS;
 
 /** 未显式指定时，自动选账号能力清单里最强的可归因模型。 */
-async function resolveClaimedModel(
-  token: string,
-  accountId: number,
+function resolveClaimedModel(
   requested: string | undefined,
-  supported: string[],
-): Promise<string> {
-  const trimmed = (requested ?? '').trim();
-  let candidates = supported;
-  // 显式指定的模型不在能力清单时，先同步一次上游清单（清单可能是旧缓存），再判断
-  if (trimmed && candidates.length > 0 && !candidates.includes(trimmed)) {
-    const refreshed = await syncUpstreamModels(token, accountId).catch(
-      () => [] as string[],
+  candidates: string[],
+): string {
+  if (!candidates.length)
+    throw new DetectionError(
+      '账号尚无已同步的模型能力数据，请在账号管理中同步后重试',
     );
-    if (refreshed.length > 0) candidates = refreshed;
-  }
+  const trimmed = (requested ?? '').trim();
   if (trimmed) {
-    if (candidates.length > 0 && !candidates.includes(trimmed)) {
-      throw new Error(
-        `该账号能力清单不含 ${trimmed}（支持：${candidates.join('、')}），请改填支持的模型或留空自动选择`,
+    if (!candidates.includes(trimmed)) {
+      throw new DetectionError(
+        `该账号能力清单不含 ${trimmed}（支持：${candidates.join('、')}），请刷新模型清单后重新选择`,
       );
     }
     return trimmed;
@@ -57,27 +51,19 @@ async function resolveClaimedModel(
   for (const candidate of BANK_MODEL_PRIORITY) {
     if (candidates.includes(candidate)) return candidate;
   }
-  if (candidates.length > 0) {
-    throw new Error(
-      `该账号能力清单（${candidates.join('、')}）里没有指纹库可归因的模型`,
-    );
-  }
-  // 能力清单未知时退回默认
-  return BANK_MODEL_PRIORITY[0];
+  throw new DetectionError(
+    `该账号已同步模型（${candidates.join('、')}）里没有指纹库可归因的模型`,
+  );
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 
-export interface DetectionOutcome {
-  entry: HistoryEntry;
-  attribution: {
-    top: { model: string; displayName: string; probability: number }[];
-    usedOutputs: number;
-    diagnostics: AttributionResult['diagnostics'];
-    familyProbability: number;
-  };
-}
+// Shared across Next route bundles in the single-process board deployment.
+const runtime = globalThis as typeof globalThis & {
+  modelTraceRunning?: Set<number>;
+};
+const running = (runtime.modelTraceRunning ??= new Set<number>());
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -87,11 +73,12 @@ async function runWithRetry(
   apiKey: string,
   model: string,
   prompt: string,
+  reasoningEffort?: ReasoningEffort,
 ): Promise<string> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      return await runChatCompletion(apiKey, model, prompt);
+      return await runChatCompletion(apiKey, model, prompt, reasoningEffort);
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : '';
@@ -107,74 +94,162 @@ export async function detectAccount(
   token: string,
   account: AdminAccount,
   requestedModel?: string,
+  method: DetectionMethod = 'fingerprint',
+  prompt?: string,
+  reasoningEffort?: ReasoningEffort,
 ): Promise<DetectionOutcome> {
-  if (account.status !== 'active') {
-    throw new Error(`账号状态为 ${account.status}，仅支持检测 active 账号`);
-  }
-  const supported = await getAccountSupportedModels(token, account.id);
-  const model = await resolveClaimedModel(token, account.id, requestedModel, supported);
-  const route = await ensureProbeRoute(token, account);
-
-  // 调度开关关闭的账号（多半正是被隔离的降智号）必须照常可测：
-  // 检测窗口内临时把账号隔离到巡检分组并打开调度，测完立即恢复。
-  // 窗口期内账号不在任何生产分组，生产流量零接触。
-  const needsBypass = account.schedulable === false;
-  let originalGroupIds: number[] | null = null;
-  if (needsBypass) {
-    originalGroupIds = await getAccountGroupIds(token, account.id);
-    await updateAccount(token, account.id, { group_ids: [route.groupId] });
-    await setAccountSchedulable(token, account.id, true);
-  }
-
-  let answers: { text: string; expectedCount: number }[];
+  const request = parseDetectionRequest({
+    account_id: account.id,
+    model: requestedModel,
+    method,
+    prompt,
+    reasoning_effort: reasoningEffort,
+  });
+  if (account.status !== 'active')
+    throw new DetectionError(
+      `账号状态为 ${account.status}，仅支持检测 active 账号`,
+    );
+  if (running.has(account.id))
+    throw new DetectionError('该账号正在检测，请等待当前检测完成', 409);
+  running.add(account.id);
   try {
-    const challenges = generateChallenges(3);
-    answers = [];
-    for (const challenge of challenges) {
-      const text = await runWithRetry(route.apiKey, model, challenge.prompt);
-      answers.push({ text, expectedCount: challenge.expectedCount });
-    }
+    return await executeDetection(
+      token,
+      account,
+      request.model,
+      method,
+      request.prompt,
+      request.reasoning_effort,
+    );
   } finally {
-    if (needsBypass && originalGroupIds) {
-      // 恢复优先于检测结论；失败也要尽量还原账号调度状态
-      await setAccountSchedulable(token, account.id, false).catch(
-        () => undefined,
+    running.delete(account.id);
+  }
+}
+
+async function executeDetection(
+  token: string,
+  account: AdminAccount,
+  requestedModel: string | undefined,
+  method: DetectionMethod,
+  prompt?: string,
+  reasoningEffort?: ReasoningEffort,
+): Promise<DetectionOutcome> {
+  const startedAt = Date.now();
+  const catalog = await getAccountModelCatalog(token, account.id);
+  const model = resolveClaimedModel(
+    requestedModel,
+    catalog.models.map((item) => item.id),
+  );
+  const capability = catalog.models.find((item) => item.id === model);
+  if (
+    reasoningEffort &&
+    !capability?.reasoningEfforts.includes(reasoningEffort)
+  ) {
+    throw new DetectionError(
+      `模型 ${model} 的同步数据未列出思维强度 ${reasoningEffort}，请重新同步或跟随模型默认`,
+    );
+  }
+  const needsBypass = account.schedulable === false;
+  // Snapshot before provisioning so even preparation failures restore original membership.
+  const originalGroupIds = needsBypass
+    ? await getAccountGroupIds(token, account.id)
+    : null;
+  let preparationStarted = false;
+  let outcome: DetectionOutcome | undefined;
+  let executionError: unknown;
+  try {
+    preparationStarted = true;
+    const route = await ensureProbeRoute(token, account);
+    if (needsBypass) {
+      await updateAccount(token, account.id, { group_ids: [route.groupId] });
+      await setAccountSchedulable(token, account.id, true);
+    }
+    const base = {
+      accountId: account.id,
+      accountName: account.name,
+      model,
+      detectedAt: new Date().toISOString(),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+    };
+    if (method === 'prompt') {
+      // One request, no automatic retry or scoring in the manual inspection mode.
+      const response = await runChatCompletionResult(
+        route.apiKey,
+        model,
+        prompt!,
+        reasoningEffort,
       );
-      await updateAccount(token, account.id, {
-        group_ids: originalGroupIds,
-      }).catch(() => undefined);
+      outcome = {
+        entry: {
+          ...base,
+          method: 'prompt',
+          prompt: prompt!,
+          output: response.text,
+          finishReason: response.finishReason,
+        },
+      };
+    } else {
+      const answers = [];
+      for (const challenge of generateChallenges(3)) {
+        const text = await runWithRetry(
+          route.apiKey,
+          model,
+          challenge.prompt,
+          reasoningEffort,
+        );
+        answers.push({ text, expectedCount: challenge.expectedCount });
+      }
+      const result = analyzeOutputs(answers, bank);
+      const attribution = {
+        top: result.results.slice(0, 3).map((r) => ({
+          model: r.model,
+          displayName: r.displayName,
+          probability: r.probability,
+        })),
+        usedOutputs: result.usedOutputs,
+        diagnostics: result.diagnostics,
+        familyProbability: result.familyProbability,
+      };
+      const entry: FingerprintHistoryEntry = {
+        ...base,
+        method: 'fingerprint',
+        ...judgeAttribution(result, model),
+        prediction: result.prediction,
+        probability: result.probability,
+        top: attribution.top,
+        usedOutputs: result.usedOutputs,
+        attribution,
+      };
+      outcome = { entry, attribution };
+    }
+  } catch (error) {
+    executionError = error;
+  }
+  if (needsBypass && originalGroupIds && preparationStarted) {
+    try {
+      // Fail closed: never reattach production groups if disabling scheduling fails.
+      await setAccountSchedulable(token, account.id, false);
+    } catch (error) {
+      throw new Error(
+        `恢复失败：无法关闭账号调度，未恢复原分组，请检查账号 #${account.id}。${errorMessage(error)}${executionError ? `；检测错误：${errorMessage(executionError)}` : ''}`,
+      );
+    }
+    try {
+      await updateAccount(token, account.id, { group_ids: originalGroupIds });
+    } catch (error) {
+      throw new Error(
+        `恢复失败：调度已关闭，但原分组未恢复，请检查账号 #${account.id}。${errorMessage(error)}${executionError ? `；检测错误：${errorMessage(executionError)}` : ''}`,
+      );
     }
   }
+  if (executionError) throw executionError;
+  if (!outcome) throw new Error('检测没有产生结果');
+  outcome.entry.durationMs = Date.now() - startedAt;
+  outcome.entry.detectedAt = new Date().toISOString();
+  await appendHistory(outcome.entry);
+  return outcome;
+}
 
-  const attribution = analyzeOutputs(answers, bank);
-  const verdict: DetectionVerdict = judgeAttribution(attribution, model);
-  const entry: HistoryEntry = {
-    accountId: account.id,
-    accountName: account.name,
-    model,
-    verdict: verdict.verdict,
-    reason: verdict.reason,
-    prediction: attribution.prediction,
-    probability: attribution.probability,
-    top: attribution.results
-      .slice(0, 3)
-      .map((r) => ({ model: r.model, probability: r.probability })),
-    usedOutputs: attribution.usedOutputs,
-    detectedAt: new Date().toISOString(),
-  };
-  await appendHistory(entry);
-
-  return {
-    entry,
-    attribution: {
-      top: attribution.results.slice(0, 3).map((r) => ({
-        model: r.model,
-        displayName: r.displayName,
-        probability: r.probability,
-      })),
-      usedOutputs: attribution.usedOutputs,
-      diagnostics: attribution.diagnostics,
-      familyProbability: attribution.familyProbability,
-    },
-  };
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

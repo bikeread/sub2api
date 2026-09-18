@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatResetTime } from '@/lib/format';
+import { formatAbsoluteMinute, formatResetTime } from '@/lib/format';
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
@@ -42,5 +42,23 @@ describe('formatResetTime', () => {
   it('renders plain days when the remainder is zero', () => {
     expect(formatResetTime(inFuture(4 * DAY), 'zh')).toBe('4 天后');
     expect(formatResetTime(inFuture(4 * DAY), 'en')).toBe('in 4d');
+  });
+});
+
+describe('formatAbsoluteMinute', () => {
+  // 看板时区是 Asia/Shanghai（lib/config.ts 默认值），断言必须与其一致
+  it('renders the exact minute in the board timezone', () => {
+    expect(formatAbsoluteMinute('2026-09-24T12:08:34+08:00')).toBe('2026-09-24 12:08');
+    expect(formatAbsoluteMinute('2026-09-24T04:08:00Z')).toBe('2026-09-24 12:08');
+  });
+
+  it('does not render midnight as 24:00', () => {
+    expect(formatAbsoluteMinute('2026-09-24T00:00:00+08:00')).toBe('2026-09-24 00:00');
+  });
+
+  it('renders a dash for missing or invalid values', () => {
+    expect(formatAbsoluteMinute(null)).toBe('—');
+    expect(formatAbsoluteMinute('')).toBe('—');
+    expect(formatAbsoluteMinute('not-a-date')).toBe('—');
   });
 });

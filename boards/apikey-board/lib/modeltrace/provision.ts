@@ -18,7 +18,18 @@ export async function ensureProbeRoute(
   account: AdminAccount,
 ): Promise<ProbeRoute> {
   const cached = await getProbeRoute(account.id);
-  if (cached) return cached;
+  if (cached) {
+    // A previous isolated inspection restores the exact original groups.
+    // Reattach the cached probe group when an account is tested again.
+    const existing = await getAccountGroupIds(token, account.id);
+    if (!existing.includes(cached.groupId)) {
+      await setAccountGroupIds(token, account.id, [
+        ...existing,
+        cached.groupId,
+      ]);
+    }
+    return cached;
+  }
 
   const groupId = await createProbeGroup(
     token,
@@ -55,8 +66,15 @@ export async function ensureProbeRoute(
           current.filter((id) => id !== groupId),
         );
       }
-    } catch {
-      // 恢复失败只影响巡检分组残留，不影响生产调度
+    } catch (recoveryError) {
+      const detail =
+        recoveryError instanceof Error
+          ? recoveryError.message
+          : String(recoveryError);
+      const original = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `巡检通道准备失败：${original}；巡检分组恢复失败：${detail}`,
+      );
     }
     throw error;
   }

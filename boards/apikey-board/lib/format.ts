@@ -1,5 +1,39 @@
+import { appConfig } from '@/lib/config';
+
 export function formatInteger(value: number) {
   return new Intl.NumberFormat('en-US').format(value);
+}
+
+const minuteFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function minuteFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = minuteFormatters.get(timeZone);
+  if (cached) return cached;
+  // hourCycle h23：避免 zh-CN 下午夜被格式化成 24:00
+  const formatter = new Intl.DateTimeFormat('zh-CN', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+  minuteFormatters.set(timeZone, formatter);
+  return formatter;
+}
+
+/**
+ * 精确到分钟的绝对时刻（按看板时区渲染，如 2026-09-24 12:08）。
+ * 用于额度重置这类"必须知道确切几点"的场景——相对倒计时（"3 天 2 小时后"）看不出具体时刻。
+ */
+export function formatAbsoluteMinute(dateString: string | null): string {
+  if (!dateString) return '—';
+  const date = new Date(dateString);
+  if (!Number.isFinite(date.getTime())) return '—';
+  const parts = minuteFormatter(appConfig.timezone).formatToParts(date);
+  const pick = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+  return `${pick('year')}-${pick('month')}-${pick('day')} ${pick('hour')}:${pick('minute')}`;
 }
 
 // formatResetTime 渲染额度窗口重置倒计时。天级以下按分钟/小时向上取整；

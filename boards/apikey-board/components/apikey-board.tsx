@@ -11,10 +11,11 @@ import {
   type AdoptionLang,
 } from '@/lib/adoption';
 import { appConfig } from '@/lib/config';
-import { formatInteger, formatResetTime } from '@/lib/format';
+import { parseSubscriptionExpiry, planTypeLabel } from '@/lib/account-quotas';
+import { formatAbsoluteMinute, formatInteger, formatResetTime } from '@/lib/format';
 import { formatLatencyValue } from '@/lib/latency-chart';
 import { rangeLabel } from '@/lib/range';
-import { LatencyHealthChart } from '@/components/latency-health-chart';
+import { QuotaProjectionChart } from '@/components/quota-projection-chart';
 import type {
   AccountQuotaRow,
   AccountQuotasPayload,
@@ -27,9 +28,9 @@ import type {
   BoardView,
   GroupsPayload,
   GroupOption,
-  LatencyHealthPayload,
   ModelStatsPayload,
   OpenAIStatusPayload,
+  QuotaProjectionPayload,
   RankingPayload,
   RosterKeyOption,
   RosterPayload,
@@ -38,8 +39,8 @@ import type {
 
 type BoardData = {
   summary: SummaryPayload;
-  latency: LatencyHealthPayload;
   accountQuotas: AccountQuotasPayload;
+  quotaProjection: QuotaProjectionPayload;
   ranking: RankingPayload;
   models: ModelStatsPayload;
   openaiStatus: OpenAIStatusPayload;
@@ -102,6 +103,36 @@ function copyFor(lang: 'zh' | 'en') {
       accountQuotas: '账号额度池',
       accountQuotasHint: '上游 OpenAI OAuth 账号的 Codex 5h / 7d 快照',
       accountQuotasEmpty: '当前分组没有可展示的 Codex 额度快照',
+      subscriptionUntil: '订阅到期',
+      subscriptionMissing: '—',
+      subscriptionStaleTag: '快照',
+      subscriptionStaleHint: '该日期早于当前时间，上游快照尚未刷新；账号通常仍可正常使用',
+      quotaForecast: '额度够不够',
+      quotaForecastHint: '按当前消耗速度外推：7d 额度能否撑到重置时刻（估算）',
+      forecastNoData: '暂无可推算的账号（窗口刚开始或缺少配额快照）',
+      forecastObserved: '实测',
+      forecastProjected: '外推',
+      forecastCeiling: '100% 额度上限',
+      forecastResetMarker: '重置时刻',
+      forecastNowMarker: '现在',
+      forecastEstimation: '估算口径：上游只给整数百分比、缓存 token 可能被打折，曲线按 token 折算',
+      forecastRate: '速率',
+      forecastPerPercent: '约',
+      forecastExhaustEstimate: '预计',
+      forecastAtResetEstimate: '到重置约',
+      verdictEnough: '够',
+      verdictTight: '偏紧',
+      verdictNotEnough: '不够',
+      verdictUncertain: '不确定',
+      verdictUnknown: '无法判断',
+      stateNoWindow: '上游未提供窗口时长',
+      stateNoSnapshot: '缺少配额快照',
+      stateStaleSnapshot: '快照已过重置时刻，等待上游刷新',
+      stateWindowNotStarted: '窗口刚开始，数据不足',
+      stateTruncated: '窗口起始早于可查历史',
+      stateQuiet: '窗口内暂无消耗',
+      stateNoUsage: '窗口内无消耗记录',
+      stateRateUnavailable: '近期无消耗，无法推算速率',
       currentGroupAccount: '当前分组上游账号',
       currentGroupAccountHint: '该分组当前使用的 OpenAI OAuth 账号额度状态',
       accountName: '账号',
@@ -224,6 +255,36 @@ function copyFor(lang: 'zh' | 'en') {
       accountQuotas: 'Account Quota Pool',
       accountQuotasHint: 'Codex 5h / 7d snapshots for upstream OpenAI OAuth accounts',
       accountQuotasEmpty: 'No Codex quota snapshots for the selected group',
+      subscriptionUntil: 'Subscription until',
+      subscriptionMissing: '—',
+      subscriptionStaleTag: 'snapshot',
+      subscriptionStaleHint: 'This date is in the past and the upstream snapshot has not refreshed; the account usually still works',
+      quotaForecast: 'Will the quota last?',
+      quotaForecastHint: 'Extrapolating the current burn rate: can the 7d quota last until the reset (estimate)',
+      forecastNoData: 'No account can be projected yet (window just started, or no quota snapshot)',
+      forecastObserved: 'observed',
+      forecastProjected: 'projected',
+      forecastCeiling: '100% ceiling',
+      forecastResetMarker: 'reset',
+      forecastNowMarker: 'now',
+      forecastEstimation: 'Estimate: upstream reports integer percentages only and cached tokens may be discounted; the curve is token-derived',
+      forecastRate: 'rate',
+      forecastPerPercent: '≈',
+      forecastExhaustEstimate: 'runs out',
+      forecastAtResetEstimate: 'at reset ≈',
+      verdictEnough: 'enough',
+      verdictTight: 'tight',
+      verdictNotEnough: 'not enough',
+      verdictUncertain: 'uncertain',
+      verdictUnknown: 'unknown',
+      stateNoWindow: 'Upstream reports no window length',
+      stateNoSnapshot: 'No quota snapshot',
+      stateStaleSnapshot: 'Snapshot predates the reset; waiting for upstream refresh',
+      stateWindowNotStarted: 'Window just started, not enough data',
+      stateTruncated: 'Window start predates available history',
+      stateQuiet: 'No consumption in this window yet',
+      stateNoUsage: 'No usage recorded in this window',
+      stateRateUnavailable: 'No recent consumption, rate unavailable',
       currentGroupAccount: 'Current Group Upstream Account',
       currentGroupAccountHint: 'Quota status for the OpenAI OAuth account used by this group',
       accountName: 'Account',
@@ -432,18 +493,20 @@ function useBoardData(
 
     const load = async () => {
       try {
-        const [summary, latency, ranking, models, accountQuotas, openaiStatus] = await Promise.all([
-          getJson<SummaryPayload>('/api/summary', token, range, groupId),
-          getJson<LatencyHealthPayload>('/api/latency', token, range, groupId),
-          getJson<RankingPayload>('/api/ranking', token, range, groupId),
-          getJson<ModelStatsPayload>('/api/models', token, range, groupId),
-          getJson<AccountQuotasPayload>('/api/account-quotas', token, range, groupId),
-          getJson<OpenAIStatusPayload>('/api/openai-status', token, range, groupId),
-        ]);
+        const [summary, ranking, models, accountQuotas, quotaProjection, openaiStatus] =
+          await Promise.all([
+            getJson<SummaryPayload>('/api/summary', token, range, groupId),
+            getJson<RankingPayload>('/api/ranking', token, range, groupId),
+            getJson<ModelStatsPayload>('/api/models', token, range, groupId),
+            getJson<AccountQuotasPayload>('/api/account-quotas', token, range, groupId),
+            // 固定看当前 7d 窗口，不跟随 today/7d 切换
+            getJson<QuotaProjectionPayload>('/api/quota-projection', token, range, groupId),
+            getJson<OpenAIStatusPayload>('/api/openai-status', token, range, groupId),
+          ]);
         if (!cancelled && mountedRef.current) {
           setState({
             kind: 'ready',
-            data: { summary, latency, accountQuotas, ranking, models, openaiStatus },
+            data: { summary, accountQuotas, quotaProjection, ranking, models, openaiStatus },
             refreshedAt: new Date().toISOString(),
           });
         }
@@ -729,6 +792,7 @@ function QuotaMeter({
   resetAt: string | null;
   lang: 'zh' | 'en';
 }) {
+  const copy = copyFor(lang);
   const tone = quotaTone(usedPercent);
   const width = `${Math.min(100, Math.max(0, usedPercent ?? 0))}%`;
   return (
@@ -740,7 +804,9 @@ function QuotaMeter({
       <div className="quota-meter__track">
         <span style={{ width }} />
       </div>
-      <small>{formatResetTime(resetAt, lang)}</small>
+      <small title={formatResetTime(resetAt, lang)}>
+        {copy.resetAt} {formatAbsoluteMinute(resetAt)}
+      </small>
     </div>
   );
 }
@@ -769,6 +835,7 @@ function AccountQuotaTraffic({ row, lang }: { row: AccountQuotaRow; lang: 'zh' |
 
 function QuotaAccountCard({ row, lang, featured = false }: { row: AccountQuotaRow; lang: 'zh' | 'en'; featured?: boolean }) {
   const copy = copyFor(lang);
+  const subscription = parseSubscriptionExpiry(row.subscriptionExpiresAt);
   return (
     <article className={featured ? 'quota-account quota-account--featured' : 'quota-account'}>
       <div className="quota-account__header">
@@ -776,6 +843,18 @@ function QuotaAccountCard({ row, lang, featured = false }: { row: AccountQuotaRo
           <strong>{row.accountName || `account-${row.accountId}`}</strong>
           <small>
             #{row.accountId} · {copy.snapshotAt} {formatRelativeTime(row.usageUpdatedAt, lang)}
+          </small>
+          <small className="quota-subscription">
+            <span>{copy.subscriptionUntil}</span>
+            <strong className={subscription.stale ? 'is-stale' : undefined}>
+              {subscription.date ?? copy.subscriptionMissing}
+            </strong>
+            {row.planType ? <em className="plan-badge">{planTypeLabel(row.planType, lang)}</em> : null}
+            {subscription.stale ? (
+              <em className="plan-badge plan-badge--stale" title={copy.subscriptionStaleHint}>
+                {copy.subscriptionStaleTag}
+              </em>
+            ) : null}
           </small>
         </div>
         <StatusBadge status={row.status} lang={lang} />
@@ -1809,19 +1888,40 @@ export function APIKeyBoard() {
 
           <OpenAIStatusBanner payload={state.data.openaiStatus} lang={lang} />
 
-          <LatencyHealthChart
-            payload={state.data.latency}
-            lang={lang}
+          <QuotaProjectionChart
+            payload={state.data.quotaProjection}
             labels={{
-              title: copy.latencyHealth,
-              hint: copy.latencyHealthHint,
-              noData: copy.noData,
-              p50: copy.p50Label,
-              p95: copy.p95Label,
-              p99: copy.p99Label,
-              slow: copy.slowLabel,
-              errors: copy.errorMarkersLabel,
-              requests: copy.requestsShort,
+              title: copy.quotaForecast,
+              hint: copy.quotaForecastHint,
+              noData: copy.forecastNoData,
+              observed: copy.forecastObserved,
+              projected: copy.forecastProjected,
+              ceiling: copy.forecastCeiling,
+              resetMarker: copy.forecastResetMarker,
+              nowMarker: copy.forecastNowMarker,
+              estimation: copy.forecastEstimation,
+              rateLabel: copy.forecastRate,
+              perPercentLabel: copy.forecastPerPercent,
+              exhaustEstimate: copy.forecastExhaustEstimate,
+              atResetEstimate: copy.forecastAtResetEstimate,
+              verdicts: {
+                enough: copy.verdictEnough,
+                tight: copy.verdictTight,
+                'not-enough': copy.verdictNotEnough,
+                uncertain: copy.verdictUncertain,
+                unknown: copy.verdictUnknown,
+              },
+              states: {
+                ok: copy.verdictUnknown,
+                'no-window': copy.stateNoWindow,
+                'no-snapshot': copy.stateNoSnapshot,
+                'stale-snapshot': copy.stateStaleSnapshot,
+                'window-not-started': copy.stateWindowNotStarted,
+                truncated: copy.stateTruncated,
+                quiet: copy.stateQuiet,
+                'no-usage': copy.stateNoUsage,
+                'rate-unavailable': copy.stateRateUnavailable,
+              },
             }}
           />
 

@@ -5,6 +5,8 @@ import {
   parseCodexQuotaWindow,
   parseExtraDate,
   parseExtraNumber,
+  parseSubscriptionExpiry,
+  planTypeLabel,
 } from '@/lib/account-quotas';
 
 describe('account quota helpers', () => {
@@ -97,5 +99,48 @@ describe('account quota helpers', () => {
     );
 
     expect(window).toEqual({ usedPercent: null, resetAt: null });
+  });
+});
+
+describe('subscription expiry', () => {
+  const now = new Date('2026-09-18T09:00:00Z');
+
+  it('keeps the upstream date part and flags a past value as stale', () => {
+    // 生产实测：RW-pro 的订阅到期是 2026-09-11，早于当前时间，但账号仍在正常服务
+    expect(parseSubscriptionExpiry('2026-09-11T14:02:58+00:00', now)).toEqual({
+      date: '2026-09-11',
+      stale: true,
+    });
+  });
+
+  it('does not flag a future value', () => {
+    expect(parseSubscriptionExpiry('2026-09-22T14:39:08+00:00', now)).toEqual({
+      date: '2026-09-22',
+      stale: false,
+    });
+  });
+
+  it('preserves the date as written, without shifting across timezones', () => {
+    expect(parseSubscriptionExpiry('2026-09-24T01:30:00+08:00', now).date).toBe('2026-09-24');
+  });
+
+  it('returns nulls for missing or unparseable values', () => {
+    expect(parseSubscriptionExpiry(null, now)).toEqual({ date: null, stale: false });
+    expect(parseSubscriptionExpiry('', now)).toEqual({ date: null, stale: false });
+    expect(parseSubscriptionExpiry('not-a-date', now)).toEqual({ date: null, stale: false });
+  });
+});
+
+describe('planTypeLabel', () => {
+  it('maps known plan types per language', () => {
+    expect(planTypeLabel('pro', 'zh')).toBe('Pro');
+    expect(planTypeLabel('free', 'zh')).toBe('免费');
+    expect(planTypeLabel('prolite', 'en')).toBe('Pro Lite');
+    expect(planTypeLabel('PROLITE', 'zh')).toBe('Pro Lite');
+  });
+
+  it('falls back to the raw value and a dash', () => {
+    expect(planTypeLabel('mystery', 'zh')).toBe('mystery');
+    expect(planTypeLabel(null, 'zh')).toBe('—');
   });
 });

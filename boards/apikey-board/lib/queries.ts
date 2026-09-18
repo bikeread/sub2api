@@ -4,8 +4,10 @@ import {
   hasCodexQuotaSnapshot,
   parseCodexQuotaWindow,
   parseExtraDate,
+  parseExtraNumber,
 } from '@/lib/account-quotas';
 import { appConfig } from '@/lib/config';
+import { buildQuotaProjections, summarizeVerdicts } from '@/lib/quota-projection';
 import { trendGranularity } from '@/lib/range';
 import { activeRosterNames } from '@/lib/roster';
 import {
@@ -25,6 +27,9 @@ import type {
   LatencyHealthPayload,
   ModelStatsPayload,
   ModelStatsRow,
+  QuotaProjectionAccount,
+  QuotaProjectionBucket,
+  QuotaProjectionPayload,
   RankingPayload,
   RankingRow,
   SummaryPayload,
@@ -576,11 +581,17 @@ export async function getAccountQuotas(
   const filter = accountGroupFilter(groupId, 1);
   const sql = `
     WITH selected_accounts AS (
-      SELECT a.id, a.name, a.status, a.last_used_at, a.extra
+      SELECT a.id, a.name, a.status, a.last_used_at, a.extra,
+             -- 只抽这两个键：credentials 里还有 token，绝不让它离开数据库
+             NULLIF(a.credentials->>'plan_type', '') AS plan_type,
+             NULLIF(a.credentials->>'subscription_expires_at', '') AS subscription_expires_at
       FROM accounts a
       WHERE a.deleted_at IS NULL
         AND a.platform = 'openai'
         AND a.type = 'oauth'
+        -- 额度池只展示在用的号：状态异常或已关闭调度的账号不展示
+        AND a.status = 'active'
+        AND a.schedulable
         AND (
           a.extra ? 'codex_5h_used_percent'
           OR a.extra ? 'codex_7d_used_percent'
@@ -615,6 +626,8 @@ export async function getAccountQuotas(
       sa.status,
       sa.last_used_at,
       sa.extra,
+      sa.plan_type,
+      sa.subscription_expires_at,
       COALESCE(u5.requests, 0) AS requests_5h,
       COALESCE(u5.tokens, 0) AS tokens_5h,
       COALESCE(u5.cost, 0) AS cost_5h,
@@ -656,6 +669,10 @@ export async function getAccountQuotas(
         status: String(row.status || 'unknown'),
         lastUsedAt: row.last_used_at ? new Date(row.last_used_at).toISOString() : null,
         usageUpdatedAt: usageUpdatedAt ? usageUpdatedAt.toISOString() : null,
+        planType: row.plan_type ? String(row.plan_type) : null,
+        subscriptionExpiresAt: row.subscription_expires_at
+          ? String(row.subscription_expires_at)
+          : null,
         fiveHour: parseCodexQuotaWindow(extra, '5h', now),
         sevenDay: parseCodexQuotaWindow(extra, '7d', now),
         requests5h: Number(row.requests_5h || 0),
@@ -672,5 +689,124 @@ export async function getAccountQuotas(
     groupId,
     generatedAt: new Date().toISOString(),
     rows: mapped,
+  };
+}
+
+/** 趋势查询需要回看的历史长度（天）：7 天窗口 + 余量 */
+const QUOTA_HISTORY_DAYS = 9;
+
+/**
+ * Codex 7d 配额的消耗趋势与"够不够"推算。
+ *
+ * 两步查询：① 候选账号 + 上游快照的原始字段（credentials 只取 plan_type 一个键）；
+ * ② 这些账号按小时聚合的 token 消耗（有界回看，命中 account_id+created_at 索引）。
+ * 窗口边界与所有换算都交给纯函数（lib/quota-projection.ts），这里只负责取数和对齐。
+ */
+export async function getQuotaProjection(
+  pool: Pool,
+  groupId: number | null = null,
+): Promise<QuotaProjectionPayload> {
+  const now = new Date();
+  const filter = accountGroupFilter(groupId, 1);
+
+  const accountsSql = `
+    SELECT
+      a.id,
+      a.name,
+      a.extra->>'codex_7d_used_percent'   AS used_percent_raw,
+      a.extra->>'codex_7d_reset_at'       AS reset_at_raw,
+      a.extra->>'codex_7d_window_minutes' AS window_minutes_raw,
+      a.extra->>'codex_usage_updated_at'  AS snapshot_at_raw,
+      NULLIF(a.credentials->>'plan_type', '') AS plan_type
+    FROM accounts a
+    WHERE a.deleted_at IS NULL
+      AND a.platform = 'openai'
+      AND a.type = 'oauth'
+      AND a.status = 'active'
+      AND a.schedulable
+      AND a.extra ? 'codex_7d_used_percent'
+      ${filter.clause}
+    ORDER BY a.id ASC
+    LIMIT 50
+  `;
+
+  const { rows: accountRows } = await pool.query(accountsSql, filter.params);
+
+  const accountIds = accountRows
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isSafeInteger(id));
+
+  const historySince = new Date(now.getTime() - QUOTA_HISTORY_DAYS * 86_400_000);
+  const bucketsByAccount = new Map<number, QuotaProjectionBucket[]>();
+
+  if (accountIds.length > 0) {
+    const bucketsSql = `
+      SELECT
+        ul.account_id,
+        (date_trunc('hour', ul.created_at AT TIME ZONE $1) AT TIME ZONE $1) AS bucket_at,
+        TO_CHAR(date_trunc('hour', ul.created_at AT TIME ZONE $1), 'MM-DD HH24:00') AS label,
+        ${TOKENS_SQL} AS tokens
+      FROM usage_logs ul
+      WHERE ul.account_id = ANY($2::bigint[])
+        AND ul.created_at >= $3
+      GROUP BY 1, 2, 3
+      ORDER BY 1 ASC, 2 ASC
+    `;
+    const { rows } = await pool.query(bucketsSql, [
+      appConfig.timezone,
+      accountIds,
+      historySince,
+    ]);
+    for (const row of rows) {
+      const accountId = Number(row.account_id);
+      const at = row.bucket_at ? new Date(row.bucket_at).getTime() : Number.NaN;
+      if (!Number.isFinite(at)) continue;
+      const list = bucketsByAccount.get(accountId) ?? [];
+      list.push({
+        ts: at,
+        label: String(row.label ?? ''),
+        tokens: Number(row.tokens || 0),
+      });
+      bucketsByAccount.set(accountId, list);
+    }
+  }
+
+  const accounts: QuotaProjectionAccount[] = accountRows.map((row) => {
+    const accountId = Number(row.id);
+    const usedPercent = parseExtraNumber(row.used_percent_raw);
+    const resetAt = parseExtraDate(row.reset_at_raw);
+    const snapshotAt = parseExtraDate(row.snapshot_at_raw);
+    const rawWindowMinutes = parseExtraNumber(row.window_minutes_raw);
+    const windowMinutes =
+      rawWindowMinutes !== null && rawWindowMinutes > 0 ? Math.round(rawWindowMinutes) : null;
+    const windowStartMs =
+      resetAt && windowMinutes ? resetAt.getTime() - windowMinutes * 60_000 : null;
+    const all = bucketsByAccount.get(accountId) ?? [];
+    // 只保留本账号窗口内、且不晚于快照的桶（桶按整点对齐，落点误差上限 1 小时）
+    const buckets =
+      windowStartMs === null || !snapshotAt
+        ? all
+        : all.filter((bucket) => bucket.ts >= windowStartMs && bucket.ts <= snapshotAt.getTime());
+
+    return {
+      accountId,
+      accountName: String(row.name ?? ''),
+      planType: row.plan_type ? String(row.plan_type) : null,
+      usedPercent,
+      resetAt: resetAt ? resetAt.toISOString() : null,
+      windowStartAt: windowStartMs === null ? null : new Date(windowStartMs).toISOString(),
+      snapshotAt: snapshotAt ? snapshotAt.toISOString() : null,
+      windowMinutes,
+      buckets,
+    } satisfies QuotaProjectionAccount;
+  });
+
+  const views = buildQuotaProjections(accounts, now.getTime(), historySince.getTime());
+
+  return {
+    groupId,
+    generatedAt: new Date().toISOString(),
+    summary: summarizeVerdicts(views),
+    views,
   };
 }

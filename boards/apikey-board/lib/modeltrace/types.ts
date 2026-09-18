@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from './options';
+
 // Port of xqy2006/ModelTrace fingerprint math (MIT, see data/MODELTRACE-LICENSE).
 export interface BankModel {
   id: string;
@@ -83,3 +85,42 @@ export interface DetectionVerdict {
   verdict: Verdict;
   reason: string;
 }
+
+export interface AttributionDetail {
+  top: { model: string; displayName: string; probability: number }[];
+  usedOutputs: number;
+  diagnostics: AnswerDiagnostic[];
+  familyProbability: number;
+}
+
+interface HistoryBase {
+  accountId: number;
+  accountName: string;
+  model: string;
+  detectedAt: string;
+  durationMs?: number;
+  reasoningEffort?: ReasoningEffort;
+}
+
+export interface FingerprintHistoryEntry extends HistoryBase {
+  method?: 'fingerprint'; // Old JSONL entries have no method.
+  verdict: Verdict;
+  reason: string;
+  prediction: string;
+  probability: number;
+  top: { model: string; probability: number }[];
+  usedOutputs: number;
+  attribution?: AttributionDetail;
+}
+
+export interface PromptHistoryEntry extends HistoryBase {
+  method: 'prompt';
+  prompt: string;
+  output: string;
+  finishReason: string | null;
+}
+
+export type HistoryEntry = FingerprintHistoryEntry | PromptHistoryEntry;
+export type DetectionOutcome =
+  | { entry: FingerprintHistoryEntry; attribution: AttributionDetail }
+  | { entry: PromptHistoryEntry };

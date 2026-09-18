@@ -152,6 +152,8 @@ export interface AccountQuotaRow {
   status: string;
   lastUsedAt: string | null;
   usageUpdatedAt: string | null;
+  planType: string | null;
+  subscriptionExpiresAt: string | null;
   fiveHour: AccountQuotaWindow;
   sevenDay: AccountQuotaWindow;
   requests5h: number;
@@ -166,6 +168,98 @@ export interface AccountQuotasPayload {
   groupId: number | null;
   generatedAt: string;
   rows: AccountQuotaRow[];
+}
+
+/** Codex 7d 配额的消耗趋势/预测：服务端只给原始事实，换算与判定在 lib/quota-projection.ts 里算。 */
+export interface QuotaProjectionBucket {
+  /** 桶起点（绝对毫秒，已按 Board 时区对齐） */
+  ts: number;
+  /** 展示用标签，如 09-18 16:00 */
+  label: string;
+  /** 该小时内消耗的 token（已按快照时刻截断） */
+  tokens: number;
+}
+
+export interface QuotaProjectionAccount {
+  accountId: number;
+  accountName: string;
+  planType: string | null;
+  usedPercent: number | null;
+  resetAt: string | null;
+  windowStartAt: string | null;
+  snapshotAt: string | null;
+  windowMinutes: number | null;
+  buckets: QuotaProjectionBucket[];
+}
+
+export interface QuotaProjectionPayload {
+  groupId: number | null;
+  generatedAt: string;
+  summary: Record<QuotaVerdict, number>;
+  views: QuotaProjectionView[];
+}
+
+export type QuotaVerdict = 'enough' | 'tight' | 'not-enough' | 'uncertain' | 'unknown';
+
+export type QuotaProjectionState =
+  | 'ok'
+  | 'no-window'
+  | 'no-snapshot'
+  | 'stale-snapshot'
+  | 'window-not-started'
+  | 'truncated'
+  | 'quiet'
+  | 'no-usage'
+  | 'rate-unavailable';
+
+export type QuotaCalibration = 'ok' | 'coarse' | 'unavailable';
+
+export interface QuotaHistoryPoint {
+  ts: number;
+  /** 估算的累计使用百分比（已裁剪到 100） */
+  percent: number;
+  tokens: number;
+}
+
+export interface QuotaForecastPoint {
+  ts: number;
+  percent: number;
+}
+
+export interface QuotaPercentBand {
+  min: number;
+  max: number;
+}
+
+/** 一个账号的 Codex 配额消耗曲线 + 预测（由 lib/quota-projection.ts 纯函数算出） */
+export interface QuotaProjectionView {
+  accountId: number;
+  accountName: string;
+  planType: string | null;
+  state: QuotaProjectionState;
+  verdict: QuotaVerdict;
+  calibration: QuotaCalibration;
+  /** 上游原始百分比（未经"重置后归零"处理） */
+  usedPercent: number | null;
+  resetAtMs: number | null;
+  windowStartMs: number | null;
+  snapshotMs: number | null;
+  windowMinutes: number | null;
+  tokensInWindow: number;
+  tokensPerPercent: number | null;
+  tokensPerPercentBand: { min: number; max: number } | null;
+  /** 估算速率：百分点/小时 */
+  ratePerHour: number;
+  /** 速率口径：回看了多少小时 */
+  lookbackHours: number;
+  rateSpanStartMs: number | null;
+  percentAtReset: number | null;
+  percentAtResetBand: QuotaPercentBand | null;
+  /** 预计达到 100% 的时刻 */
+  exhaustAtMs: number | null;
+  history: QuotaHistoryPoint[];
+  /** 预测段：只两个点（快照点 → min(重置, 耗尽)），前端画一条虚线 */
+  forecast: QuotaForecastPoint[];
 }
 
 export interface GroupOption {
